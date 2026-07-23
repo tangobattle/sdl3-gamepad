@@ -4,9 +4,19 @@
 //! subsystem (which the gamepad API sits on) plus HIDAPI — no audio,
 //! video, render, or GPU. See `Cargo.toml` for the exact feature trim.
 //! The API here never surfaces an `sdl3` type, so callers depend on
-//! this crate instead of `sdl3`: they get [`Button`], [`Axis`], and
-//! [`GamepadEvent`], drive input with [`init`] + [`pump`], and stay
-//! oblivious to SDL.
+//! this crate instead of `sdl3`: they get [`Button`], [`Axis`],
+//! [`GamepadId`], and [`GamepadEvent`], drive input with [`init`] +
+//! [`next_event`], and stay oblivious to SDL.
+//!
+//! # Event model
+//!
+//! Following `gilrs`, input is a pull-based stream rather than a
+//! callback: [`next_event`] pops one [`GamepadEvent`] at a time (loop
+//! `while let Some(ev) = next_event()` to drain a frame), and every
+//! event is tagged with the [`GamepadId`] it came from. Connect and
+//! disconnect surface as their own [`GamepadEventKind`] variants. The
+//! crate does **not** coalesce multiple pads into one logical
+//! controller — that's the caller's call to make, keyed on `id`.
 //!
 //! # Threading
 //!
@@ -17,7 +27,7 @@
 //! [`send_wrapper::SendWrapper`] globals: `SendWrapper` is `Send`/`Sync`
 //! but panics if the inner value is touched from any thread other than
 //! the one that built it, which is exactly the guarantee we need.
-//! [`pump`] must likewise be called on that same thread.
+//! [`next_event`] must likewise be called on that same thread.
 //!
 //! The `EventPump` is an SDL singleton (the `sdl3` crate ref-counts it,
 //! so only one can exist at a time), which is why it lives here in a
@@ -114,23 +124,47 @@ pub enum Axis {
     TriggerRight,
 }
 
+/// Opaque, per-connection identifier for a gamepad — SDL's joystick
+/// instance id. Stable while a pad stays plugged in; SDL may reuse an
+/// id for a different physical pad after a disconnect, so treat it as
+/// meaningful only between a [`Connected`] and its matching
+/// [`Disconnected`]. Callers key their per-device state on this.
+///
+/// [`Connected`]: GamepadEventKind::Connected
+/// [`Disconnected`]: GamepadEventKind::Disconnected
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct GamepadId(pub u32);
+
+/// One gamepad event, tagged with the device it came from. Mirrors
+/// `gilrs`'s `Event { id, event }` split so callers can route or
+/// coalesce per device however they like.
+#[derive(Clone, Copy, Debug)]
+pub struct GamepadEvent {
+    pub id: GamepadId,
+    pub kind: GamepadEventKind,
+}
+
 /// The narrow slice of gamepad input this crate emits. Keeping the
 /// surface this small is what lets callers stay independent of `sdl3`'s
 /// much richer event enum.
 #[derive(Clone, Copy, Debug)]
-pub enum GamepadEvent {
+pub enum GamepadEventKind {
+    /// A controller was plugged in (hotplug only — pads already
+    /// attached when [`init`] ran are opened silently, with no event).
+    Connected,
+    /// A controller was unplugged. Callers should drop any held state
+    /// keyed on this device's `id` so its buttons don't read as
+    /// still-down.
+    Disconnected,
     ButtonDown(Button),
     ButtonUp(Button),
     AxisMotion { axis: Axis, value: f32 },
-    /// A controller was unplugged. Callers should clear any held
-    /// gamepad state so disconnected buttons don't read as still-down.
-    DeviceRemoved,
 }
 
 /// The canonical SDL owner. Held for its lifetime so SDL stays inited;
 /// dropping it (at process exit) runs `SDL_Quit`.
 static SDL: Mutex<Option<SendWrapper<Sdl>>> = Mutex::new(None);
-/// The singleton event pump, drained by [`pump`].
+/// The singleton event pump, drained by [`next_event`].
 static EVENT_PUMP: Mutex<Option<SendWrapper<EventPump>>> = Mutex::new(None);
 /// The gamepad subsystem plus the currently-open device handles.
 static GAMEPAD_CONTEXT: Mutex<Option<SendWrapper<Context>>> = Mutex::new(None);
@@ -139,8 +173,8 @@ struct Context {
     gamepads: GamepadSubsystem,
     /// Keep `Gamepad` handles alive — `GamepadSubsystem::open` returns
     /// owned handles; if they drop, SDL stops emitting events for those
-    /// devices.
-    open: HashMap<u32, Gamepad>,
+    /// devices. Keyed by the same [`GamepadId`] the events carry.
+    open: HashMap<GamepadId, Gamepad>,
 }
 
 /// Initialize SDL3 and warm the gamepad context. Call once at startup,
@@ -189,12 +223,12 @@ fn build_context(sdl: &Sdl) -> Result<Context, String> {
         open: HashMap::new(),
     };
     // Open every gamepad already attached at startup. Hotplug is handled
-    // in `pump` via `ControllerDeviceAdded`.
+    // in `next_event` via `ControllerDeviceAdded`.
     if let Ok(ids) = ctx.gamepads.gamepads() {
         for id in ids {
             match ctx.gamepads.open(id) {
                 Ok(g) => {
-                    ctx.open.insert(id.0, g);
+                    ctx.open.insert(GamepadId(id.0), g);
                 }
                 Err(e) => log::warn!("failed to open gamepad {}: {e}", id.0),
             }
@@ -203,26 +237,27 @@ fn build_context(sdl: &Sdl) -> Result<Context, String> {
     Ok(ctx)
 }
 
-/// Drain every event currently queued in SDL and emit the
-/// gamepad-relevant ones via `on_event`. Handles device add/remove
-/// internally — callers only see the narrow [`GamepadEvent`]. No-op if
-/// [`init`] never succeeded.
+/// Pop the next gamepad event from SDL's queue, or `None` once it's
+/// drained for now. Following `gilrs`, callers pull in a loop —
+/// `while let Some(ev) = next_event() { … }` — to consume a frame's
+/// worth of input. Device add/remove is handled internally (the pad is
+/// opened/closed) *and* surfaced as a [`GamepadEventKind::Connected`] /
+/// [`GamepadEventKind::Disconnected`]. Non-gamepad SDL events are
+/// skipped over silently. Always `None` if [`init`] never succeeded.
 ///
 /// Must run on the thread that called [`init`]; touching the SDL handles
 /// from any other thread panics (via `SendWrapper`).
-pub fn pump(mut on_event: impl FnMut(GamepadEvent)) {
-    let Some(mut pump) = event_pump() else { return };
+pub fn next_event() -> Option<GamepadEvent> {
+    let mut pump = event_pump()?;
     let mut guard = GAMEPAD_CONTEXT.lock().unwrap();
-    let Some(ctx) = guard.as_mut() else { return };
+    let ctx = guard.as_mut()?;
+    // Loop past events we don't care about (keyboard, mouse, window, …)
+    // until we find a gamepad one or exhaust the queue.
     while let Some(event) = pump.poll_event() {
-        match event {
-            SdlEvent::ControllerButtonDown { button, .. } => {
-                on_event(GamepadEvent::ButtonDown(Button::from_sdl(button)));
-            }
-            SdlEvent::ControllerButtonUp { button, .. } => {
-                on_event(GamepadEvent::ButtonUp(Button::from_sdl(button)));
-            }
-            SdlEvent::ControllerAxisMotion { axis, value, .. } => {
+        let (which, kind) = match event {
+            SdlEvent::ControllerButtonDown { button, which, .. } => (which, GamepadEventKind::ButtonDown(Button::from_sdl(button))),
+            SdlEvent::ControllerButtonUp { button, which, .. } => (which, GamepadEventKind::ButtonUp(Button::from_sdl(button))),
+            SdlEvent::ControllerAxisMotion { axis, value, which, .. } => {
                 use sdl3::gamepad::Axis as A;
                 let axis = match axis {
                     A::LeftX => Axis::LeftX,
@@ -232,29 +267,42 @@ pub fn pump(mut on_event: impl FnMut(GamepadEvent)) {
                     A::TriggerLeft => Axis::TriggerLeft,
                     A::TriggerRight => Axis::TriggerRight,
                 };
-                on_event(GamepadEvent::AxisMotion {
-                    axis,
-                    // SDL's raw i16 [-32768, 32767] → [-1, 1]. The sign
-                    // convention (stick-up negative) is left untouched.
-                    value: (value as f32 / 0x7FFF as f32).clamp(-1.0, 1.0),
-                });
+                (
+                    which,
+                    GamepadEventKind::AxisMotion {
+                        axis,
+                        // SDL's raw i16 [-32768, 32767] → [-1, 1]. The sign
+                        // convention (stick-up negative) is left untouched.
+                        value: (value as f32 / 0x7FFF as f32).clamp(-1.0, 1.0),
+                    },
+                )
             }
             SdlEvent::ControllerDeviceAdded { which, .. } => {
-                let id = SDL_JoystickID(which);
-                match ctx.gamepads.open(id) {
+                match ctx.gamepads.open(SDL_JoystickID(which)) {
                     Ok(g) => {
-                        ctx.open.insert(which, g);
+                        ctx.open.insert(GamepadId(which), g);
                     }
-                    Err(e) => log::warn!("failed to open hotplug gamepad {which}: {e}"),
+                    // Couldn't open it, so no input will ever flow from
+                    // it — don't announce a connection we can't back.
+                    Err(e) => {
+                        log::warn!("failed to open hotplug gamepad {which}: {e}");
+                        continue;
+                    }
                 }
+                (which, GamepadEventKind::Connected)
             }
             SdlEvent::ControllerDeviceRemoved { which, .. } => {
-                ctx.open.remove(&which);
-                on_event(GamepadEvent::DeviceRemoved);
+                ctx.open.remove(&GamepadId(which));
+                (which, GamepadEventKind::Disconnected)
             }
-            _ => {}
-        }
+            _ => continue,
+        };
+        return Some(GamepadEvent {
+            id: GamepadId(which),
+            kind,
+        });
     }
+    None
 }
 
 /// RAII exclusive borrow of the global event pump. `!Send` (it holds a
