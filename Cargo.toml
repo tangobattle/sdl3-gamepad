@@ -31,6 +31,14 @@ sdl3-sys = { version = "0.6", default-features = false, features = [
     "no-default-subsystems",
     "sdl-joystick",
     "sdl-hidapi",
+    # Turning the video subsystem off is not enough on its own: SDL's
+    # cmake still fails a unix build outright when neither X11 nor
+    # Wayland development libraries are present, on the assumption that
+    # a machine without them can't have wanted a windowless SDL. This
+    # is the documented way to say we did mean it -- without it, a
+    # Linux CI image needs the whole X11/Wayland dev stack installed to
+    # build a gamepad library that never opens a window.
+    "sdl-unix-console-build",
 ] }
 # Lets the `!Send` SDL handles (Sdl, EventPump, GamepadSubsystem) live in
 # `Send` globals: SendWrapper is Send + Sync but panics if the inner
