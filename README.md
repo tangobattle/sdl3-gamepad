@@ -11,7 +11,7 @@ gamepad_facade::init("MyApp");
 
 // Then, on that same thread, drain input whenever you want to poll:
 while let Some(ev) = gamepad_facade::next_event() {
-    use gamepad_facade::GamepadEventKind as K;
+    use gamepad_facade::EventKind as K;
     match ev.kind {
         K::ButtonDown(button) => { /* ... */ }
         K::ButtonUp(button) => { /* ... */ }
@@ -22,7 +22,7 @@ while let Some(ev) = gamepad_facade::next_event() {
 }
 ```
 
-Every event is tagged with the `GamepadId` it came from; the crate does
+Every event is tagged with the `Id` it came from; the crate does
 not coalesce multiple pads into one logical controller — that is the
 caller's call to make.
 

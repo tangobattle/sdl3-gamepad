@@ -1,8 +1,8 @@
 //! One gamepad-input API over two very different sources: SDL3 natively,
 //! and the browser's [Gamepad API] in a wasm build.
 //!
-//! Callers see only [`Button`], [`Axis`], [`GamepadId`] and
-//! [`GamepadEvent`], drive input with [`init`] + [`next_event`], and stay
+//! Callers see only [`Button`], [`Axis`], [`Id`] and
+//! [`Event`], drive input with [`init`] + [`next_event`], and stay
 //! oblivious to which backend is underneath.
 //!
 //! [Gamepad API]: https://developer.mozilla.org/en-US/docs/Web/API/Gamepad_API
@@ -10,10 +10,10 @@
 //! # Event model
 //!
 //! Following `gilrs`, input is a pull-based stream rather than a
-//! callback: [`next_event`] pops one [`GamepadEvent`] at a time (loop
+//! callback: [`next_event`] pops one [`Event`] at a time (loop
 //! `while let Some(ev) = next_event()` to drain a frame), and every
-//! event is tagged with the [`GamepadId`] it came from. Connect and
-//! disconnect surface as their own [`GamepadEventKind`] variants. The
+//! event is tagged with the [`Id`] it came from. Connect and
+//! disconnect surface as their own [`EventKind`] variants. The
 //! crate does **not** coalesce multiple pads into one logical
 //! controller — that's the caller's call to make, keyed on `id`.
 //!
@@ -111,24 +111,24 @@ pub enum Axis {
 /// Natively this is SDL's joystick instance id; in a browser it is the
 /// gamepad's `index`.
 ///
-/// [`Connected`]: GamepadEventKind::Connected
-/// [`Disconnected`]: GamepadEventKind::Disconnected
+/// [`Connected`]: EventKind::Connected
+/// [`Disconnected`]: EventKind::Disconnected
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub struct GamepadId(pub u32);
+pub struct Id(pub u32);
 
 /// One gamepad event, tagged with the device it came from. Mirrors
 /// `gilrs`'s `Event { id, event }` split so callers can route or
 /// coalesce per device however they like.
 #[derive(Clone, Copy, Debug)]
-pub struct GamepadEvent {
-    pub id: GamepadId,
-    pub kind: GamepadEventKind,
+pub struct Event {
+    pub id: Id,
+    pub kind: EventKind,
 }
 
 /// The narrow slice of gamepad input this crate emits. Keeping the
 /// surface this small is what lets one API cover both backends.
 #[derive(Clone, Copy, Debug)]
-pub enum GamepadEventKind {
+pub enum EventKind {
     /// A controller became available. Pads already attached when
     /// [`init`] ran are adopted silently on the native backend, with no
     /// event; in a browser a pad is invisible until the user presses
@@ -161,12 +161,12 @@ pub fn init(app_name: &str) {
 /// Pop the next gamepad event, or `None` once there is nothing left for
 /// now. Callers pull in a loop — `while let Some(ev) = next_event() { … }`
 /// — to consume a frame's worth of input. Device add/remove is handled
-/// internally *and* surfaced as [`GamepadEventKind::Connected`] /
-/// [`GamepadEventKind::Disconnected`]. Always `None` if [`init`] never
+/// internally *and* surfaced as [`EventKind::Connected`] /
+/// [`EventKind::Disconnected`]. Always `None` if [`init`] never
 /// succeeded.
 ///
 /// Must run on the thread that called [`init`].
-pub fn next_event() -> Option<GamepadEvent> {
+pub fn next_event() -> Option<Event> {
     backend::next_event()
 }
 
@@ -188,7 +188,7 @@ mod backend {
         log::info!("gamepad support is not compiled in (no `sdl3` feature)");
     }
 
-    pub fn next_event() -> Option<super::GamepadEvent> {
+    pub fn next_event() -> Option<super::Event> {
         None
     }
 }

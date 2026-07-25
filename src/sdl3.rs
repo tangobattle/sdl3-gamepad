@@ -28,7 +28,7 @@ use sdl3::sys::joystick::SDL_JoystickID;
 use sdl3::{EventPump, GamepadSubsystem, Sdl};
 use send_wrapper::SendWrapper;
 
-use crate::{Axis, Button, GamepadEvent, GamepadEventKind, GamepadId};
+use crate::{Axis, Button, Event, EventKind, Id};
 
 impl Button {
     fn from_sdl(b: SdlButton) -> Self {
@@ -75,8 +75,8 @@ struct Context {
     gamepads: GamepadSubsystem,
     /// Keep `Gamepad` handles alive — `GamepadSubsystem::open` returns
     /// owned handles; if they drop, SDL stops emitting events for those
-    /// devices. Keyed by the same [`GamepadId`] the events carry.
-    open: HashMap<GamepadId, Gamepad>,
+    /// devices. Keyed by the same [`Id`] the events carry.
+    open: HashMap<Id, Gamepad>,
 }
 
 /// Initialize SDL3 and warm the gamepad context. Opening every
@@ -127,7 +127,7 @@ fn build_context(sdl: &Sdl) -> Result<Context, String> {
         for id in ids {
             match ctx.gamepads.open(id) {
                 Ok(g) => {
-                    ctx.open.insert(GamepadId(id.0), g);
+                    ctx.open.insert(Id(id.0), g);
                 }
                 Err(e) => log::warn!("failed to open gamepad {}: {e}", id.0),
             }
@@ -140,7 +140,7 @@ fn build_context(sdl: &Sdl) -> Result<Context, String> {
 /// drained for now. Device add/remove is handled internally (the pad is
 /// opened/closed) *and* surfaced as a `Connected` / `Disconnected`.
 /// Non-gamepad SDL events are skipped over silently.
-pub fn next_event() -> Option<GamepadEvent> {
+pub fn next_event() -> Option<Event> {
     let mut pump = event_pump()?;
     let mut guard = GAMEPAD_CONTEXT.lock().unwrap();
     let ctx = guard.as_mut()?;
@@ -148,12 +148,11 @@ pub fn next_event() -> Option<GamepadEvent> {
     // until we find a gamepad one or exhaust the queue.
     while let Some(event) = pump.poll_event() {
         let (which, kind) = match event {
-            SdlEvent::ControllerButtonDown { button, which, .. } => (
-                which,
-                GamepadEventKind::ButtonDown(Button::from_sdl(button)),
-            ),
+            SdlEvent::ControllerButtonDown { button, which, .. } => {
+                (which, EventKind::ButtonDown(Button::from_sdl(button)))
+            }
             SdlEvent::ControllerButtonUp { button, which, .. } => {
-                (which, GamepadEventKind::ButtonUp(Button::from_sdl(button)))
+                (which, EventKind::ButtonUp(Button::from_sdl(button)))
             }
             SdlEvent::ControllerAxisMotion {
                 axis, value, which, ..
@@ -169,7 +168,7 @@ pub fn next_event() -> Option<GamepadEvent> {
                 };
                 (
                     which,
-                    GamepadEventKind::AxisMotion {
+                    EventKind::AxisMotion {
                         axis,
                         // SDL's raw i16 [-32768, 32767] → [-1, 1]. The sign
                         // convention (stick-up negative) is left untouched.
@@ -180,7 +179,7 @@ pub fn next_event() -> Option<GamepadEvent> {
             SdlEvent::ControllerDeviceAdded { which, .. } => {
                 match ctx.gamepads.open(SDL_JoystickID(which)) {
                     Ok(g) => {
-                        ctx.open.insert(GamepadId(which), g);
+                        ctx.open.insert(Id(which), g);
                     }
                     // Couldn't open it, so no input will ever flow from
                     // it — don't announce a connection we can't back.
@@ -189,16 +188,16 @@ pub fn next_event() -> Option<GamepadEvent> {
                         continue;
                     }
                 }
-                (which, GamepadEventKind::Connected)
+                (which, EventKind::Connected)
             }
             SdlEvent::ControllerDeviceRemoved { which, .. } => {
-                ctx.open.remove(&GamepadId(which));
-                (which, GamepadEventKind::Disconnected)
+                ctx.open.remove(&Id(which));
+                (which, EventKind::Disconnected)
             }
             _ => continue,
         };
-        return Some(GamepadEvent {
-            id: GamepadId(which),
+        return Some(Event {
+            id: Id(which),
             kind,
         });
     }

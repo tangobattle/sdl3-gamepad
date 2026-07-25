@@ -36,7 +36,7 @@ use std::collections::HashMap;
 
 use wasm_bindgen::JsCast as _;
 
-use crate::{Axis, Button, GamepadEvent, GamepadEventKind, GamepadId};
+use crate::{Axis, Button, Event, EventKind, Id};
 
 /// The buttons of the browser's ["standard gamepad"] mapping, by index.
 ///
@@ -103,7 +103,7 @@ struct Backend {
     live: bool,
     pads: HashMap<u32, PadState>,
     /// Events synthesized by the last poll and not yet handed out.
-    queue: std::collections::VecDeque<GamepadEvent>,
+    queue: std::collections::VecDeque<Event>,
     /// Whether a non-standard mapping has already been complained about,
     /// so a pad the browser can't map doesn't log once per poll forever.
     warned_nonstandard: bool,
@@ -126,7 +126,7 @@ pub fn init(_app_name: &str) {
     BACKEND.with(|b| b.borrow_mut().live = true);
 }
 
-pub fn next_event() -> Option<GamepadEvent> {
+pub fn next_event() -> Option<Event> {
     BACKEND.with(|b| {
         let mut b = b.borrow_mut();
         if !b.live {
@@ -177,9 +177,9 @@ fn poll(b: &mut Backend) {
         let fresh = !b.pads.contains_key(&index);
         if fresh {
             b.pads.insert(index, PadState::default());
-            b.queue.push_back(GamepadEvent {
-                id: GamepadId(index),
-                kind: GamepadEventKind::Connected,
+            b.queue.push_back(Event {
+                id: Id(index),
+                kind: EventKind::Connected,
             });
         }
         diff_pad(b, index, &pad);
@@ -194,9 +194,9 @@ fn poll(b: &mut Backend) {
         .collect();
     for index in dropped {
         b.pads.remove(&index);
-        b.queue.push_back(GamepadEvent {
-            id: GamepadId(index),
-            kind: GamepadEventKind::Disconnected,
+        b.queue.push_back(Event {
+            id: Id(index),
+            kind: EventKind::Disconnected,
         });
     }
 }
@@ -206,8 +206,8 @@ fn poll(b: &mut Backend) {
 fn diff_pad(b: &mut Backend, index: u32, pad: &web_sys::Gamepad) {
     let buttons = pad.buttons();
     let axes = pad.axes();
-    let id = GamepadId(index);
-    let mut events: Vec<GamepadEvent> = Vec::new();
+    let id = Id(index);
+    let mut events: Vec<Event> = Vec::new();
 
     let state = b.pads.entry(index).or_default();
 
@@ -223,12 +223,12 @@ fn diff_pad(b: &mut Backend, index: u32, pad: &web_sys::Gamepad) {
         };
         if pressed != state.buttons[idx] {
             state.buttons[idx] = pressed;
-            events.push(GamepadEvent {
+            events.push(Event {
                 id,
                 kind: if pressed {
-                    GamepadEventKind::ButtonDown(button)
+                    EventKind::ButtonDown(button)
                 } else {
-                    GamepadEventKind::ButtonUp(button)
+                    EventKind::ButtonUp(button)
                 },
             });
         }
@@ -245,9 +245,9 @@ fn diff_pad(b: &mut Backend, index: u32, pad: &web_sys::Gamepad) {
         };
         if (value - state.triggers[idx]).abs() >= AXIS_EPSILON {
             state.triggers[idx] = value;
-            events.push(GamepadEvent {
+            events.push(Event {
                 id,
-                kind: GamepadEventKind::AxisMotion { axis, value },
+                kind: EventKind::AxisMotion { axis, value },
             });
         }
     }
@@ -263,9 +263,9 @@ fn diff_pad(b: &mut Backend, index: u32, pad: &web_sys::Gamepad) {
         let value = value.clamp(-1.0, 1.0);
         if (value - state.axes[idx]).abs() >= AXIS_EPSILON {
             state.axes[idx] = value;
-            events.push(GamepadEvent {
+            events.push(Event {
                 id,
-                kind: GamepadEventKind::AxisMotion { axis, value },
+                kind: EventKind::AxisMotion { axis, value },
             });
         }
     }
